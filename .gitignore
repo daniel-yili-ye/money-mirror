@@ -16,3 +16,5 @@ dbt_packages/
 .user.yml
 
 .streamlit
+
+/data
