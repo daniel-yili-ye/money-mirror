@@ -18,6 +18,40 @@ def get_redirect_uri():
         return st.secrets["deployment"]["local_url"]
 
 
+def get_authenticated_user_email():
+    """Securely get the authenticated user's email from validated JWT token"""
+    try:
+        # Check if user is connected first
+        if not st.session_state.get("connected", False):
+            return None
+
+        # Get the authenticator instance
+        if "authenticator" not in st.session_state:
+            return None
+
+        authenticator = st.session_state["authenticator"]
+
+        # Get and validate the JWT token - NO FALLBACK to session state
+        decoded_token = authenticator.auth_token_manager.get_decoded_token()
+
+        if decoded_token and "email" in decoded_token:
+            return decoded_token["email"]
+        else:
+            # Force logout if token validation fails
+            if st.session_state.get("connected"):
+                st.session_state["connected"] = False
+                st.session_state["user_info"] = None
+                st.warning("Session expired. Please log in again.")
+            return None
+    except Exception as e:
+        # Force logout on any authentication error
+        if st.session_state.get("connected"):
+            st.session_state["connected"] = False
+            st.session_state["user_info"] = None
+            st.error("Authentication error. Please log in again.")
+        return None
+
+
 # Initialize GCP Storage client
 @st.cache_resource
 def init_gcp_client():
@@ -45,22 +79,31 @@ def init_gcp_client():
     credentials = service_account.Credentials.from_service_account_info(
         credentials_info
     )
-    return storage.Client(
-        credentials=credentials, project=credentials_info["project_id"]
-    )
+    return storage.Client(credentials=credentials)
 
 
 def upload_to_gcp(
-    file_obj, institution, filename, bucket_name="personal-finance-dashboard"
+    file_obj,
+    institution,
+    filename,
+    bucket_name="personal-finance-dashboard",
 ):
-    """Upload file to GCP bucket"""
+    """Upload file to GCP bucket with user-specific organization"""
+    # Securely get authenticated user email
+    user_email = get_authenticated_user_email()
+    if not user_email:
+        st.error("User not authenticated. Please log in.")
+        return None
+
     try:
         client = init_gcp_client()
         bucket = client.bucket(bucket_name)
 
-        # Create path: institution/timestamp_filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        blob_path = f"{institution}/{timestamp}_{filename}"
+        # Create user-specific path: users/user_email/institution/timestamp_filename
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Sanitize email for file path (replace @ and . with -)
+        safe_email = user_email.replace("@", "-").replace(".", "-")
+        blob_path = f"users/{safe_email}/{institution}/{timestamp}-{filename}"
 
         blob = bucket.blob(blob_path)
         file_obj.seek(0)  # Reset file pointer
@@ -73,20 +116,31 @@ def upload_to_gcp(
 
 
 def list_files_from_gcp(bucket_name="personal-finance-dashboard"):
-    """List all files from GCP bucket grouped by institution"""
+    """List files from GCP bucket for authenticated user grouped by institution"""
+    # Securely get authenticated user email
+    user_email = get_authenticated_user_email()
+    if not user_email:
+        st.error("User not authenticated. Please log in.")
+        return {}
+
     try:
         client = init_gcp_client()
         bucket = client.bucket(bucket_name)
 
         files_by_institution = {}
-        blobs = bucket.list_blobs()
+        # Sanitize email for file path (replace @ and . with -)
+        safe_email = user_email.replace("@", "-").replace(".", "-")
+        user_prefix = f"users/{safe_email}/"
+
+        # Only list files for this specific authenticated user
+        blobs = bucket.list_blobs(prefix=user_prefix)
 
         for blob in blobs:
-            # Parse institution from path
+            # Parse path: users/safe_email/institution/filename
             parts = blob.name.split("/")
-            if len(parts) >= 2:
-                institution = parts[0]
-                filename = "/".join(parts[1:])
+            if len(parts) >= 4:  # users/safe_email/institution/filename
+                institution = parts[2]  # Third part is institution
+                filename = "/".join(parts[3:])  # Rest is filename
 
                 if institution not in files_by_institution:
                     files_by_institution[institution] = []
@@ -107,7 +161,21 @@ def list_files_from_gcp(bucket_name="personal-finance-dashboard"):
 
 
 def delete_file_from_gcp(blob_name, bucket_name="personal-finance-dashboard"):
-    """Delete file from GCP bucket"""
+    """Delete file from GCP bucket - with additional user verification"""
+    # Securely get authenticated user email
+    user_email = get_authenticated_user_email()
+    if not user_email:
+        st.error("User not authenticated. Please log in.")
+        return False
+
+    # Verify the blob belongs to the authenticated user
+    safe_email = user_email.replace("@", "-").replace(".", "-")
+    expected_prefix = f"users/{safe_email}/"
+
+    if not blob_name.startswith(expected_prefix):
+        st.error("Access denied: Cannot delete files that don't belong to you")
+        return False
+
     try:
         client = init_gcp_client()
         bucket = client.bucket(bucket_name)
@@ -121,27 +189,36 @@ def delete_file_from_gcp(blob_name, bucket_name="personal-finance-dashboard"):
 
 def render_file_upload_view():
     """Render the file upload interface"""
-    st.header("📁 Upload Financial Data")
+    st.header("📁 Upload Bank / Credit Card Statements")
+
+    # Initialize upload counter for dynamic key
+    if "upload_counter" not in st.session_state:
+        st.session_state.upload_counter = 0
 
     # Form for file upload
     with st.form("upload_form"):
         # Financial Institution Dropdown
+        def kebab_to_display(kebab_name):
+            return kebab_name.replace("-", " ").title()
+
         institution = st.selectbox(
-            "Select Financial Institution",
-            ["American Express", "Wealthsimple"],
+            "Select Statement Type",
+            ["american-express-credit-card", "wealthsimple-cash"],
             index=0,
+            format_func=kebab_to_display,
         )
 
-        # File uploader
+        # File uploader with dynamic key to clear after successful upload
         uploaded_files = st.file_uploader(
             "Choose CSV or Excel files",
             type=["csv", "xls", "xlsx"],
             accept_multiple_files=True,
-            key="file_uploader",
+            key=f"file_uploader_{st.session_state.upload_counter}",
         )
 
-        # Process button
+        # Buttons
         process_button = st.form_submit_button("🚀 Process Files", type="primary")
+        clear_button = st.form_submit_button("🗑️ Clear All Files", type="secondary")
 
         if process_button and uploaded_files:
             progress_bar = st.progress(0)
@@ -159,8 +236,10 @@ def render_file_upload_view():
                 if blob_path:
                     uploaded_count += 1
                     # Add to session state log
+                    current_user_email = get_authenticated_user_email()
                     st.session_state.uploaded_files_log.append(
                         {
+                            "user_email": current_user_email,
                             "institution": institution,
                             "filename": file.name,
                             "blob_path": blob_path,
@@ -176,13 +255,22 @@ def render_file_upload_view():
             progress_bar.empty()
 
             if uploaded_count > 0:
-                st.success(
+                st.toast(
                     f"✅ Successfully uploaded {uploaded_count}/{total_files} files to {institution}!"
                 )
-                # Clear the file uploader
+
+                # Clear the file uploader by incrementing the counter
+                st.session_state.upload_counter += 1
+
+                # Brief pause to show success message, then rerun
                 st.rerun()
             else:
                 st.error("❌ No files were uploaded successfully")
+
+        # Handle clear button
+        if clear_button:
+            st.session_state.upload_counter += 1
+            st.rerun()
 
 
 def render_file_manager_view():
@@ -193,7 +281,7 @@ def render_file_manager_view():
     if st.button("🔄 Refresh File List"):
         st.rerun()
 
-    # Get files from GCP
+    # Get files from GCP for current user
     files_by_institution = list_files_from_gcp()
 
     if not files_by_institution:
@@ -252,7 +340,7 @@ def render_analytics_view():
     """Render the analytics interface"""
     st.header("📊 Financial Analytics")
 
-    # Get files for analysis
+    # Get files for analysis for current user
     files_by_institution = list_files_from_gcp()
 
     if not files_by_institution:
@@ -335,7 +423,8 @@ def render_sidebar_navigation():
 
         # User info and logout
         st.write("👤 **User Info**")
-        st.write(f"Email: {st.session_state['user_info'].get('email', 'Unknown')}")
+        current_user_email = get_authenticated_user_email()
+        st.write(f"Email: {current_user_email or 'Unknown'}")
 
         if st.button("🚪 Logout", type="secondary"):
             authenticator.logout()
@@ -391,6 +480,10 @@ authenticator = Authenticator(
     token_key=st.secrets["auth"]["JWT_SECRET_KEY"],
     redirect_uri=get_redirect_uri(),
 )
+
+# Store authenticator in session state for secure access
+st.session_state["authenticator"] = authenticator
+
 authenticator.check_auth()
 authenticator.login()
 
@@ -418,4 +511,4 @@ if st.session_state["connected"]:
         render_analytics_view()
 
 if not st.session_state["connected"]:
-    st.info("Please log in to access your financial dashboard.")
+    pass

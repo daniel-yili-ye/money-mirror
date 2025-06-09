@@ -55,7 +55,7 @@ class Authenticator:
     def login(self):
         if not st.session_state["connected"]:
             auth_url = self.get_auth_url()
-            st.write("Please log in to access your dashboard")
+            st.info("Please log in to access your financial dashboard")
             st.link_button("🔑 Login with Google", auth_url)
 
     def check_auth(self):
