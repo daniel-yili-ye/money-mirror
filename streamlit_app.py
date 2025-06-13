@@ -160,6 +160,11 @@ def list_files_from_gcp(bucket_name="personal-finance-dashboard"):
         return {}
 
 
+def kebab_to_display(kebab_name):
+    """Convert kebab-case to readable display format"""
+    return kebab_name.replace("-", " ").title()
+
+
 def delete_file_from_gcp(blob_name, bucket_name="personal-finance-dashboard"):
     """Delete file from GCP bucket - with additional user verification"""
     # Securely get authenticated user email
@@ -195,12 +200,23 @@ def render_file_upload_view():
     if "upload_counter" not in st.session_state:
         st.session_state.upload_counter = 0
 
+    # Show upload success toast
+    if st.session_state.get("show_upload_toast"):
+        uploaded_count = st.session_state.get("uploaded_count", 0)
+        total_files = st.session_state.get("total_files", 0)
+        institution = st.session_state.get("upload_institution", "")
+        display_name = kebab_to_display(institution) if institution else ""
+        st.toast(
+            f"✅ Successfully uploaded {uploaded_count}/{total_files} files to {display_name}!"
+        )
+        st.session_state["show_upload_toast"] = False
+        st.session_state["uploaded_count"] = None
+        st.session_state["total_files"] = None
+        st.session_state["upload_institution"] = None
+
     # Form for file upload
     with st.form("upload_form"):
         # Financial Institution Dropdown
-        def kebab_to_display(kebab_name):
-            return kebab_name.replace("-", " ").title()
-
         institution = st.selectbox(
             "Select Statement Type",
             ["american-express-credit-card", "wealthsimple-cash"],
@@ -255,9 +271,10 @@ def render_file_upload_view():
             progress_bar.empty()
 
             if uploaded_count > 0:
-                st.toast(
-                    f"✅ Successfully uploaded {uploaded_count}/{total_files} files to {institution}!"
-                )
+                st.session_state["uploaded_count"] = uploaded_count
+                st.session_state["total_files"] = total_files
+                st.session_state["upload_institution"] = institution
+                st.session_state["show_upload_toast"] = True
 
                 # Clear the file uploader by incrementing the counter
                 st.session_state.upload_counter += 1
@@ -288,50 +305,65 @@ def render_file_manager_view():
         st.info("No files found in the storage bucket.")
     else:
         for institution, files in files_by_institution.items():
-            st.subheader(f"📊 {institution}")
+            display_name = kebab_to_display(institution)
+            st.subheader(f"📊 {display_name}")
 
             if not files:
                 st.write("No files for this institution")
                 continue
 
-            # Create a DataFrame for better display
-            df_data = []
-            for file_info in files:
-                df_data.append(
-                    {
-                        "Filename": file_info["filename"],
-                        "Size (KB)": round(file_info["size"] / 1024, 2),
-                        "Uploaded": file_info["created"].strftime("%Y-%m-%d %H:%M:%S")
+            # Add a header row for clarity
+            col1, col2, col3, col4 = st.columns([3, 1, 2, 0.5])
+            with col1:
+                st.markdown("**Filename**")
+            with col2:
+                st.markdown("**Size**")
+            with col3:
+                st.markdown("**Uploaded**")
+            with col4:
+                st.markdown("**Action**")
+            st.markdown("---")
+
+            # Display files with individual delete buttons for each row
+            for i, file_info in enumerate(files):
+                col1, col2, col3, col4 = st.columns([3, 1, 2, 0.5])
+
+                with col1:
+                    st.write(file_info["filename"])
+
+                with col2:
+                    st.write(f"{round(file_info['size'] / 1024, 2)} KB")
+
+                with col3:
+                    upload_time = (
+                        file_info["created"].strftime("%Y-%m-%d %H:%M:%S")
                         if file_info["created"]
-                        else "Unknown",
-                    }
-                )
+                        else "Unknown"
+                    )
+                    st.write(upload_time)
 
-            df = pl.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True)
-
-            # Delete functionality
-            st.write("**Delete Files:**")
-
-            file_to_delete = st.selectbox(
-                "Select file to delete",
-                options=[f["filename"] for f in files],
-                key=f"delete_select_{institution}",
-            )
-
-            if st.button("🗑️ Delete", key=f"delete_btn_{institution}"):
-                # Find the blob name for the selected file
-                blob_name = None
-                for file_info in files:
-                    if file_info["filename"] == file_to_delete:
+                with col4:
+                    # Trash icon button for each row
+                    if st.button(
+                        "🗑️",
+                        key=f"delete_{institution}_{i}",
+                        help=f"Delete {file_info['filename']}",
+                    ):
                         blob_name = file_info["blob_name"]
-                        break
+                        filename = file_info["filename"]
+                        if delete_file_from_gcp(blob_name):
+                            st.session_state["deleted_filename"] = filename
+                            st.session_state["show_delete_toast"] = True
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to delete {filename}")
 
-                if blob_name and delete_file_from_gcp(blob_name):
-                    st.success(f"Deleted {file_to_delete}")
-                    st.rerun()
-                else:
-                    st.error(f"Failed to delete {file_to_delete}")
+            # Show delete success toast
+            if st.session_state.get("show_delete_toast"):
+                deleted_file = st.session_state.get("deleted_filename", "file")
+                st.toast(f"✅ Successfully deleted {deleted_file}")
+                st.session_state["show_delete_toast"] = False
+                st.session_state["deleted_filename"] = None
 
             st.divider()
 
@@ -369,7 +401,8 @@ def render_analytics_view():
     st.subheader("📈 Data by Institution")
 
     for institution, files in files_by_institution.items():
-        with st.expander(f"{institution} ({len(files)} files)"):
+        display_name = kebab_to_display(institution)
+        with st.expander(f"{display_name} ({len(files)} files)"):
             if files:
                 # Create a simple analysis
                 total_size = sum(f["size"] for f in files)
@@ -441,8 +474,8 @@ def render_sidebar_navigation():
 
 # Streamlit App Configuration
 st.set_page_config(
-    page_title="Personal Finance Dashboard",
-    page_icon="💰",
+    page_title="Money Mirror",
+    page_icon="🪞",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -470,7 +503,7 @@ st.markdown(
 )
 
 # Main App
-st.title("💰 Personal Finance Dashboard")
+st.title("🪞 Money Mirror")
 st.markdown(
     "Upload your statements to get clear spending breakdowns and personalized recommendations"
 )
