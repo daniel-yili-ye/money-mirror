@@ -4,52 +4,6 @@ from google.cloud import storage
 from google.oauth2 import service_account
 from datetime import datetime
 import os
-from auth import Authenticator
-
-
-def get_redirect_uri():
-    """Get the appropriate redirect URI based on the environment"""
-    # Check if we're running in Streamlit Cloud (production)
-    # Streamlit Cloud sets various environment variables
-    if any(key in os.environ for key in ["STREAMLIT_CLOUD", "STREAMLIT_SHARING"]):
-        return st.secrets["deployment"]["production_url"]
-    else:
-        # Local development
-        return st.secrets["deployment"]["local_url"]
-
-
-def get_authenticated_user_email():
-    """Securely get the authenticated user's email from validated JWT token"""
-    try:
-        # Check if user is connected first
-        if not st.session_state.get("connected", False):
-            return None
-
-        # Get the authenticator instance
-        if "authenticator" not in st.session_state:
-            return None
-
-        authenticator = st.session_state["authenticator"]
-
-        # Get and validate the JWT token - NO FALLBACK to session state
-        decoded_token = authenticator.auth_token_manager.get_decoded_token()
-
-        if decoded_token and "email" in decoded_token:
-            return decoded_token["email"]
-        else:
-            # Force logout if token validation fails
-            if st.session_state.get("connected"):
-                st.session_state["connected"] = False
-                st.session_state["user_info"] = None
-                st.warning("Session expired. Please log in again.")
-            return None
-    except Exception as e:
-        # Force logout on any authentication error
-        if st.session_state.get("connected"):
-            st.session_state["connected"] = False
-            st.session_state["user_info"] = None
-            st.error("Authentication error. Please log in again.")
-        return None
 
 
 # Initialize GCP Storage client
@@ -88,22 +42,14 @@ def upload_to_gcp(
     filename,
     bucket_name="personal-finance-dashboard",
 ):
-    """Upload file to GCP bucket with user-specific organization"""
-    # Securely get authenticated user email
-    user_email = get_authenticated_user_email()
-    if not user_email:
-        st.error("User not authenticated. Please log in.")
-        return None
-
+    """Upload file to GCP bucket with institution-based organization"""
+    
     try:
         client = init_gcp_client()
         bucket = client.bucket(bucket_name)
 
-        # Create user-specific path: users/user_email/institution/timestamp_filename
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # Sanitize email for file path (replace @ and . with -)
-        safe_email = user_email.replace("@", "-").replace(".", "-")
-        blob_path = f"users/{safe_email}/{institution}/{timestamp}-{filename}"
+        # Create institution-specific path: institution/timestamp_filename
+        blob_path = f"{institution}/{filename}"
 
         blob = bucket.blob(blob_path)
         file_obj.seek(0)  # Reset file pointer
@@ -116,31 +62,23 @@ def upload_to_gcp(
 
 
 def list_files_from_gcp(bucket_name="personal-finance-dashboard"):
-    """List files from GCP bucket for authenticated user grouped by institution"""
-    # Securely get authenticated user email
-    user_email = get_authenticated_user_email()
-    if not user_email:
-        st.error("User not authenticated. Please log in.")
-        return {}
-
+    """List files from GCP bucket grouped by institution"""
+    
     try:
         client = init_gcp_client()
         bucket = client.bucket(bucket_name)
 
         files_by_institution = {}
-        # Sanitize email for file path (replace @ and . with -)
-        safe_email = user_email.replace("@", "-").replace(".", "-")
-        user_prefix = f"users/{safe_email}/"
 
-        # Only list files for this specific authenticated user
-        blobs = bucket.list_blobs(prefix=user_prefix)
+        # List all files in the bucket
+        blobs = bucket.list_blobs()
 
         for blob in blobs:
-            # Parse path: users/safe_email/institution/filename
+            # Parse path: institution/filename
             parts = blob.name.split("/")
-            if len(parts) >= 4:  # users/safe_email/institution/filename
-                institution = parts[2]  # Third part is institution
-                filename = "/".join(parts[3:])  # Rest is filename
+            if len(parts) >= 2:  # institution/filename
+                institution = parts[0]  # First part is institution
+                filename = "/".join(parts[1:])  # Rest is filename
 
                 if institution not in files_by_institution:
                     files_by_institution[institution] = []
@@ -166,21 +104,8 @@ def kebab_to_display(kebab_name):
 
 
 def delete_file_from_gcp(blob_name, bucket_name="personal-finance-dashboard"):
-    """Delete file from GCP bucket - with additional user verification"""
-    # Securely get authenticated user email
-    user_email = get_authenticated_user_email()
-    if not user_email:
-        st.error("User not authenticated. Please log in.")
-        return False
-
-    # Verify the blob belongs to the authenticated user
-    safe_email = user_email.replace("@", "-").replace(".", "-")
-    expected_prefix = f"users/{safe_email}/"
-
-    if not blob_name.startswith(expected_prefix):
-        st.error("Access denied: Cannot delete files that don't belong to you")
-        return False
-
+    """Delete file from GCP bucket"""
+    
     try:
         client = init_gcp_client()
         bucket = client.bucket(bucket_name)
@@ -252,10 +177,8 @@ def render_file_upload_view():
                 if blob_path:
                     uploaded_count += 1
                     # Add to session state log
-                    current_user_email = get_authenticated_user_email()
                     st.session_state.uploaded_files_log.append(
                         {
-                            "user_email": current_user_email,
                             "institution": institution,
                             "filename": file.name,
                             "blob_path": blob_path,
@@ -454,16 +377,6 @@ def render_sidebar_navigation():
 
         st.divider()
 
-        # User info and logout
-        st.write("👤 **User Info**")
-        current_user_email = get_authenticated_user_email()
-        st.write(f"Email: {current_user_email or 'Unknown'}")
-
-        if st.button("🚪 Logout", type="secondary"):
-            authenticator.logout()
-
-        st.divider()
-
         # Session info
         st.write("📊 **Session Stats**")
         files_uploaded = len(st.session_state.get("uploaded_files_log", []))
@@ -508,40 +421,23 @@ st.markdown(
     "Upload your statements to get clear spending breakdowns and personalized recommendations"
 )
 
-# Initialize authenticator
-authenticator = Authenticator(
-    token_key=st.secrets["auth"]["JWT_SECRET_KEY"],
-    redirect_uri=get_redirect_uri(),
-)
+# Initialize session state for uploaded files tracking
+if "uploaded_files_log" not in st.session_state:
+    st.session_state.uploaded_files_log = []
 
-# Store authenticator in session state for secure access
-st.session_state["authenticator"] = authenticator
+# Render sidebar navigation and get selected page
+selected_page = render_sidebar_navigation()
 
-authenticator.check_auth()
-authenticator.login()
+# Render content based on navigation selection
+if selected_page == "📁 File Manager":
+    # Create tabs for upload and manage
+    tab1, tab2 = st.tabs(["⬆️ Upload Files", "📋 Manage Files"])
 
-# Show content that requires login
-if st.session_state["connected"]:
-    # Initialize session state for uploaded files tracking
-    if "uploaded_files_log" not in st.session_state:
-        st.session_state.uploaded_files_log = []
+    with tab1:
+        render_file_upload_view()
 
-    # Render sidebar navigation and get selected page
-    selected_page = render_sidebar_navigation()
+    with tab2:
+        render_file_manager_view()
 
-    # Render content based on navigation selection
-    if selected_page == "📁 File Manager":
-        # Create tabs for upload and manage
-        tab1, tab2 = st.tabs(["⬆️ Upload Files", "📋 Manage Files"])
-
-        with tab1:
-            render_file_upload_view()
-
-        with tab2:
-            render_file_manager_view()
-
-    elif selected_page == "📊 Analytics":
-        render_analytics_view()
-
-if not st.session_state["connected"]:
-    pass
+elif selected_page == "📊 Analytics":
+    render_analytics_view()

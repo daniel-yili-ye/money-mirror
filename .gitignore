@@ -18,3 +18,5 @@ dbt_packages/
 .streamlit
 
 /data
+
+.env
