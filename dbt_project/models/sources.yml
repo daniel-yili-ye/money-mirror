@@ -1,0 +1,50 @@
+version: 2
+
+sources:
+  - name: personal_finance
+    description: "Personal finance data from various institutions"
+    database: "{{ env_var('DBT_GCP_PROJECT') }}" # Will be set in Cloud Run
+    schema: personal_finance
+
+    tables:
+      - name: raw_amex_transactions
+        description: "Raw AmEx credit card transaction data"
+        columns:
+          - name: file_hash
+            description: "Hash of the source file to prevent reprocessing"
+            tests:
+              - not_null
+          - name: row_hash
+            description: "Hash of the row content for deduplication"
+            tests:
+              - not_null
+
+      - name: raw_wealthsimple_transactions
+        description: "Raw Wealthsimple cash account transaction data"
+        columns:
+          - name: file_hash
+            description: "Hash of the source file to prevent reprocessing"
+            tests:
+              - not_null
+          - name: row_hash
+            description: "Hash of the row content for deduplication"
+            tests:
+              - not_null
+
+      - name: dim_categories
+        description: "Predefined category taxonomy"
+        columns:
+          - name: category_id
+            description: "Unique category identifier"
+            tests:
+              - unique
+              - not_null
+
+      - name: dim_description_categories
+        description: "Gemini-generated category mappings cache"
+        columns:
+          - name: description_key
+            description: "Normalized transaction description"
+            tests:
+              - unique
+              - not_null

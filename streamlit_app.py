@@ -4,6 +4,8 @@ from google.cloud import storage
 from google.oauth2 import service_account
 from datetime import datetime
 import os
+import requests
+import json
 
 
 # Initialize GCP Storage client
@@ -115,6 +117,79 @@ def delete_file_from_gcp(blob_name, bucket_name="personal-finance-dashboard"):
     except Exception as e:
         st.error(f"Delete failed: {str(e)}")
         return False
+
+
+def process_all_data():
+    """Trigger the Cloud Run data processing pipeline"""
+    try:
+        # Get all files grouped by institution
+        files_by_institution = list_files_from_gcp()
+        
+        if not files_by_institution:
+            st.warning("No files to process!")
+            return
+        
+        # Cloud Run service URL (you'll need to set this in secrets)
+        cloud_run_url = st.secrets.get("cloud_run", {}).get("process_data_url", "")
+        
+        if not cloud_run_url:
+            st.error("Cloud Run URL not configured. Please add 'cloud_run.process_data_url' to your secrets.")
+            return
+        
+        with st.spinner("🔄 Processing data pipeline..."):
+            total_files_processed = 0
+            
+            # Process each institution separately
+            for institution, files in files_by_institution.items():
+                # Convert institution display name back to code
+                institution_code = institution.replace("-", "_").lower()
+                if institution_code == "american_express_credit_card":
+                    institution_code = "amex"
+                elif institution_code == "wealthsimple_cash":
+                    institution_code = "wealthsimple"
+                
+                file_paths = [file_info["blob_name"] for file_info in files]
+                
+                # Prepare request payload
+                payload = {
+                    "institution": institution_code,
+                    "file_paths": file_paths,
+                    "force_reprocess": False,
+                    "auth_token": "streamlit_app"  # TODO: Use proper JWT token
+                }
+                
+                # Call Cloud Run function
+                response = requests.post(
+                    f"{cloud_run_url}/process-data",
+                    json=payload,
+                    timeout=300,  # 5 minute timeout
+                    headers={"Content-Type": "application/json"}
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    files_processed = result.get("result", {}).get("files_processed", 0)
+                    rows_inserted = result.get("result", {}).get("rows_inserted", 0)
+                    new_categories = result.get("result", {}).get("new_categories", 0)
+                    
+                    total_files_processed += files_processed
+                    
+                    st.success(f"✅ {institution}: {files_processed} files, {rows_inserted} rows, {new_categories} new categories")
+                else:
+                    st.error(f"❌ {institution}: {response.status_code} - {response.text}")
+            
+            if total_files_processed > 0:
+                st.balloons()
+                st.success(f"🎉 Pipeline completed! Processed {total_files_processed} files total.")
+            else:
+                st.info("ℹ️ No new files to process (all files already processed)")
+                
+    except requests.exceptions.Timeout:
+        st.error("⏰ Processing timed out. Large datasets may take longer than 5 minutes.")
+    except requests.exceptions.RequestException as e:
+        st.error(f"🔌 Network error calling Cloud Run: {str(e)}")
+    except Exception as e:
+        st.error(f"❌ Unexpected error: {str(e)}")
 
 
 def render_file_upload_view():
@@ -294,6 +369,19 @@ def render_file_manager_view():
 def render_analytics_view():
     """Render the analytics interface"""
     st.header("📊 Financial Analytics")
+
+    # Data Processing Section
+    st.subheader("🔄 Data Processing")
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.write("Process and enrich your uploaded files with AI-powered categorization")
+    
+    with col2:
+        if st.button("🚀 Process Data", type="primary", help="Trigger data pipeline: parse files → load to BigQuery → run dbt → categorize with Gemini"):
+            process_all_data()
+
+    st.divider()
 
     # Get files for analysis for current user
     files_by_institution = list_files_from_gcp()
